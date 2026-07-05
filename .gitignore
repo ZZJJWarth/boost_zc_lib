@@ -1,0 +1,26 @@
+# Build outputs
+build/
+install/
+log/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# CMake / compiler byproducts
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+*.o
+*.a
+*.so
+
+# Local accidental self-symlink in this workspace
+/cpp_pubsub
+
+# Editor / OS local files
+.vscode/
+.idea/
+*.swp
+.DS_Store
