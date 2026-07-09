@@ -13,29 +13,26 @@
 #include <boost/container/scoped_allocator.hpp>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <sys/types.h>
 #include <string>
 #include <cerrno>
 #include <memory>
-#include <pthread.h>
+#include <stdexcept>
+#include <type_traits>
 #include <utility>
 
-// 在共享内存中存储pthread_mutex_t的包装结构体
-struct ShmSubscriberLiveness {
-    pthread_mutex_t mutex;
+enum class ShmMessageType : uint8_t {
+    Unknown = 0,
+    Image = 1,
+    PointCloud2 = 2,
+};
 
-    /**
-     * @brief 构造共享内存可见的健壮互斥锁。
-     * @details 将互斥锁设置为进程间共享并启用 robust 属性，用于订阅者存活检测。
-     */
-    ShmSubscriberLiveness();
+struct ShmObjectInfo {
+    ShmMessageType type;
 
-    /**
-     * @brief 析构并释放互斥锁资源。
-     */
-    ~ShmSubscriberLiveness();
+    explicit ShmObjectInfo(ShmMessageType message_type)
+        : type(message_type) {}
 };
 
 struct ShmTopic;
@@ -180,7 +177,9 @@ using ShmPointFieldAllocator = boost::interprocess::allocator<
 using ShmScopedPointFieldAllocator = boost::container::scoped_allocator_adaptor<
     ShmPointFieldAllocator,
     ShmCharAllocator>;
-using ShmPointFieldVector = vector<ShmPointField, ShmScopedPointFieldAllocator>;
+using ShmPointFieldVector = boost::interprocess::vector<
+  ShmPointField,
+  ShmScopedPointFieldAllocator>;
 
 struct ShmPointCloud2 { //内存内名称：ShmObject_[myId]
     size_t myId;
@@ -242,11 +241,12 @@ struct ShmTopic {//内存内名称：ShmTopic_[topic]
 struct ShmSubscriberInfo { // 内存内名称：ShmSubscriberInfo_[id]
     std::atomic_size_t dup_cnt;
     pid_t owner_pid;
+    uint64_t owner_start_time;
 
     /**
      * @brief 构造订阅者重复订阅信息，默认重复计数为 1。
      */
-    ShmSubscriberInfo() : dup_cnt(1), owner_pid(0) {}
+    ShmSubscriberInfo() : dup_cnt(1), owner_pid(0), owner_start_time(0) {}
 };
 
 struct ShmManager {//内存内名称：ShmManager
@@ -264,6 +264,23 @@ struct ShmManager {//内存内名称：ShmManager
     // ── 模板方法（header-only）──────────────────────────────────────────
 
     template<typename ShmMsgT>
+    static constexpr ShmMessageType message_type_for()
+    {
+        if constexpr (std::is_same<ShmMsgT, ShmImage>::value) {
+            return ShmMessageType::Image;
+        } else if constexpr (std::is_same<ShmMsgT, ShmPointCloud2>::value) {
+            return ShmMessageType::PointCloud2;
+        }
+        return ShmMessageType::Unknown;
+    }
+
+    void releaseObjectInfo(size_t msg_id, boost::interprocess::managed_shared_memory* segment)
+    {
+        std::string info_name = "ShmObjectInfo_" + std::to_string(msg_id);
+        segment->destroy<ShmObjectInfo>(info_name.c_str());
+    }
+
+    template<typename ShmMsgT>
     /**
      * @brief 释放一条共享内存消息。
      * @param data 待释放的共享内存消息指针。
@@ -278,9 +295,11 @@ struct ShmManager {//内存内名称：ShmManager
         if (data == nullptr) {
             return;
         }
+        const size_t msg_id = data->myId;
         if (force_mode) {
-            std::string obj_name = "ShmObject_" + std::to_string(data->myId);
+            std::string obj_name = "ShmObject_" + std::to_string(msg_id);
             segment->destroy<ShmMsgT>(obj_name.c_str());
+            releaseObjectInfo(msg_id, segment);
             return;
         }
         size_t previous = data->ref_cnt.load(std::memory_order_acquire);
@@ -289,9 +308,9 @@ struct ShmManager {//内存内名称：ShmManager
                  previous, previous - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
         if (previous == 1) {
-            std::printf("Message %zu has released\n", data->myId);
-            std::string obj_name = "ShmObject_" + std::to_string(data->myId);
+            std::string obj_name = "ShmObject_" + std::to_string(msg_id);
             segment->destroy<ShmMsgT>(obj_name.c_str());
+            releaseObjectInfo(msg_id, segment);
         }
     }
 
@@ -312,6 +331,13 @@ struct ShmManager {//内存内名称：ShmManager
         std::string obj_name = "ShmObject_" + std::to_string(id);
         ShmMsgT* data = segment->construct<ShmMsgT>(obj_name.c_str())(alloc);
         data->myId = id;
+        try {
+            std::string info_name = "ShmObjectInfo_" + std::to_string(id);
+            segment->construct<ShmObjectInfo>(info_name.c_str())(message_type_for<ShmMsgT>());
+        } catch (...) {
+            segment->destroy<ShmMsgT>(obj_name.c_str());
+            throw;
+        }
         return data;
     }
 
@@ -347,6 +373,10 @@ struct ShmManager {//内存内名称：ShmManager
     void releaseMessageById(
       size_t msg_id,
       size_t count,
+      boost::interprocess::managed_shared_memory* segment);
+
+    ShmMessageType getMessageTypeById(
+      size_t msg_id,
       boost::interprocess::managed_shared_memory* segment);
 
     /**
@@ -414,6 +444,7 @@ extern ShmManager * manager_;
 
 /**
  * @brief 初始化共享内存段及管理器，并增加当前用户计数。
+ * @note 该函数应在进程启动阶段单线程调用；不要与 shm_shutdown 并发调用。
  * @param name 共享内存名称。
  * @param size 共享内存大小（字节）。
  */
@@ -421,6 +452,7 @@ void shm_init(std::string name = "MyShm", size_t size = 64000000);
 
 /**
  * @brief 关闭共享内存使用并在最后一个用户退出时清理共享内存。
+ * @note 调用前应停止所有发布器、订阅器和回调线程，避免关闭后继续访问全局共享内存句柄。
  * @param name 共享内存名称。
  */
 void shm_shutdown(std::string name = "MyShm");

@@ -1,6 +1,5 @@
 #include "zc_pubsub.hpp"
 
-#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -67,7 +66,12 @@ bool prepare_publish(const std::string & topic_name, const std::string & object_
     throw std::runtime_error("invalid object name: " + object_name);
   }
 
-  if (auto * image_ptr = shm->find<ShmImage>(object_name.c_str()).first) {
+  const ShmMessageType type = manager_->getMessageTypeById(id, shm);
+  if (type == ShmMessageType::Image) {
+    auto * image_ptr = shm->find<ShmImage>(object_name.c_str()).first;
+    if (image_ptr == nullptr) {
+      throw std::runtime_error("image object not found: " + object_name);
+    }
     bool published = false;
     try {
       published = manager_->publish(topic_name.c_str(), id, image_ptr->ref_cnt, shm);
@@ -83,7 +87,11 @@ bool prepare_publish(const std::string & topic_name, const std::string & object_
     return true;
   }
 
-  if (auto * pc2_ptr = shm->find<ShmPointCloud2>(object_name.c_str()).first) {
+  if (type == ShmMessageType::PointCloud2) {
+    auto * pc2_ptr = shm->find<ShmPointCloud2>(object_name.c_str()).first;
+    if (pc2_ptr == nullptr) {
+      throw std::runtime_error("pointcloud2 object not found: " + object_name);
+    }
     bool published = false;
     try {
       published = manager_->publish(topic_name.c_str(), id, pc2_ptr->ref_cnt, shm);
@@ -113,12 +121,21 @@ void rollback_publish(const std::string & topic_name, const std::string & object
 
   manager_->removeMessageFromTopic(topic_name.c_str(), id, shm);
 
-  if (auto * image_ptr = shm->find<ShmImage>(object_name.c_str()).first) {
+  const ShmMessageType type = manager_->getMessageTypeById(id, shm);
+  if (type == ShmMessageType::Image) {
+    auto * image_ptr = shm->find<ShmImage>(object_name.c_str()).first;
+    if (image_ptr == nullptr) {
+      return;
+    }
     manager_->releaseMessage(image_ptr, shm, true);
     return;
   }
 
-  if (auto * pc2_ptr = shm->find<ShmPointCloud2>(object_name.c_str()).first) {
+  if (type == ShmMessageType::PointCloud2) {
+    auto * pc2_ptr = shm->find<ShmPointCloud2>(object_name.c_str()).first;
+    if (pc2_ptr == nullptr) {
+      return;
+    }
     manager_->releaseMessage(pc2_ptr, shm, true);
   }
 }

@@ -15,6 +15,9 @@ colcon build --packages-select cpp_pubsub --cmake-args -DROBONIX_ZC_BUILD_EXAMPL
 Set `ROBONIX_ZC_BUILD_EXAMPLES=ON` to build the example publisher/subscriber
 programs.
 
+The direct iceoryx Python comparison examples require the optional `iceoryx2`
+Python package.
+
 ## Use
 
 Downstream ROS 2 packages can depend on `cpp_pubsub`, include headers such as

@@ -12,7 +12,7 @@
 #include "rclcpp/executors.hpp"
 #include "rclcpp/utilities.hpp"
 #include "std_msgs/msg/string.hpp"
-#include "lib/zc_pubsub.hpp"
+#include "zc_pubsub.hpp"
 
 using namespace std::chrono_literals;
 

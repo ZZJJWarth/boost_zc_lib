@@ -2,7 +2,8 @@
 
 #include <cerrno>
 #include <csignal>
-#include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -18,12 +19,40 @@ namespace {
 size_t local_shm_ref_count = 0;
 std::string local_shm_name;
 
-bool is_process_alive(pid_t pid)
+uint64_t get_process_start_time(pid_t pid)
+{
+    std::ifstream stat_file("/proc/" + std::to_string(pid) + "/stat");
+    std::string stat;
+    if (!std::getline(stat_file, stat)) {
+        return 0;
+    }
+
+    const auto comm_end = stat.rfind(')');
+    if (comm_end == std::string::npos || comm_end + 2 >= stat.size()) {
+        return 0;
+    }
+
+    std::istringstream fields(stat.substr(comm_end + 2));
+    std::string token;
+    fields >> token;  // state, field 3
+    for (int field = 4; field <= 21; ++field) {
+        fields >> token;
+    }
+
+    uint64_t start_time = 0;
+    fields >> start_time;
+    return start_time;
+}
+
+bool is_process_alive(pid_t pid, uint64_t expected_start_time)
 {
     if (pid <= 0) {
         return false;
     }
-    return kill(pid, 0) == 0 || errno == EPERM;
+    if (kill(pid, 0) != 0 && errno != EPERM) {
+        return false;
+    }
+    return expected_start_time != 0 && get_process_start_time(pid) == expected_start_time;
 }
 
 void release_pending_messages(
@@ -44,21 +73,6 @@ void release_pending_messages(
 }
 
 }  // namespace
-
-// ── ShmSubscriberLiveness ────────────────────────────────────────────────────
-
-ShmSubscriberLiveness::ShmSubscriberLiveness() {
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
-    pthread_mutex_init(&mutex, &attr);
-    pthread_mutexattr_destroy(&attr);
-}
-
-ShmSubscriberLiveness::~ShmSubscriberLiveness() {
-    pthread_mutex_destroy(&mutex);
-}
 
 // ── shm_init / shm_shutdown ──────────────────────────────────────────────────
 
@@ -94,7 +108,6 @@ void shm_shutdown(std::string name) {
         }
         if (last_user) {
             boost::interprocess::shared_memory_object::remove(name.c_str());
-            puts("All the Shared memory has been cleaned up.");
         }
     }
 }
@@ -120,20 +133,36 @@ void ShmManager::releaseMessageById(
     size_t msg_id,
     size_t count,
     boost::interprocess::managed_shared_memory* segment) {
-    std::string obj_name = "ShmObject_" + std::to_string(msg_id);
-    ShmImage* image_ptr = segment->find<ShmImage>(obj_name.c_str()).first;
-    if (image_ptr != nullptr) {
-        for (size_t i = 0; i < count; ++i) {
-            releaseMessage(image_ptr, segment);
+    const ShmMessageType type = getMessageTypeById(msg_id, segment);
+    const std::string obj_name = "ShmObject_" + std::to_string(msg_id);
+
+    if (type == ShmMessageType::Image) {
+        if (ShmImage* image_ptr = segment->find<ShmImage>(obj_name.c_str()).first) {
+            for (size_t i = 0; i < count; ++i) {
+                releaseMessage(image_ptr, segment);
+            }
         }
         return;
     }
-    ShmPointCloud2* pc2_ptr = segment->find<ShmPointCloud2>(obj_name.c_str()).first;
-    if (pc2_ptr != nullptr) {
-        for (size_t i = 0; i < count; ++i) {
-            releaseMessage(pc2_ptr, segment);
+
+    if (type == ShmMessageType::PointCloud2) {
+        if (ShmPointCloud2* pc2_ptr = segment->find<ShmPointCloud2>(obj_name.c_str()).first) {
+            for (size_t i = 0; i < count; ++i) {
+                releaseMessage(pc2_ptr, segment);
+            }
         }
     }
+}
+
+ShmMessageType ShmManager::getMessageTypeById(
+    size_t msg_id,
+    boost::interprocess::managed_shared_memory* segment) {
+    std::string info_name = "ShmObjectInfo_" + std::to_string(msg_id);
+    ShmObjectInfo* info_ptr = segment->find<ShmObjectInfo>(info_name.c_str()).first;
+    if (info_ptr == nullptr) {
+        return ShmMessageType::Unknown;
+    }
+    return info_ptr->type;
 }
 
 void ShmManager::removeMessageFromTopic(
@@ -169,8 +198,6 @@ size_t ShmManager::add_subscriber(
     // Generate a unique subscriber id.
     size_t id = subscriber_cnt.fetch_add(1, std::memory_order_relaxed) + 1;
 
-    std::printf("Try to add subscriber with id %zu\n", id);
-
     // Find or create the topic entry in shared memory.
     std::string topic_name = "ShmTopic_" + topic;
     ShmTopic* topic_ptr = segment->find_or_construct<ShmTopic>(topic_name.c_str())(int_alloc);
@@ -189,19 +216,12 @@ size_t ShmManager::add_subscriber(
         // Reserved for future per-subscriber initialization guarded by the mutex.
     }
 
-    // Create per-subscriber liveness tracking in shared memory.
-    std::string liveness_name = "ShmSubscriberLiveness_" + std::to_string(id);
-    ShmSubscriberLiveness* liveness_ptr =
-        segment->find_or_construct<ShmSubscriberLiveness>(liveness_name.c_str())();
-
-    // The liveness object is kept for shared-memory layout compatibility.
-    (void)liveness_ptr;
-
     // Initialize duplicate subscription counter to 1
     std::string info_name = "ShmSubscriberInfo_" + std::to_string(id);
     ShmSubscriberInfo* info_ptr = segment->find_or_construct<ShmSubscriberInfo>(info_name.c_str())();
     info_ptr->dup_cnt.store(1, std::memory_order_relaxed);
     info_ptr->owner_pid = getpid();
+    info_ptr->owner_start_time = get_process_start_time(info_ptr->owner_pid);
 
     return id;
 }
@@ -229,7 +249,6 @@ void ShmManager::delete_subscriber(
     const std::string& topic,
     size_t id,
     boost::interprocess::managed_shared_memory* segment) {
-    printf("try to delete subscriber with id %zu\n", id);
     // Remove from topic subscriber set (single-topic setup).
     std::string topic_name = "ShmTopic_" + topic;
     ShmTopic* topic_ptr = segment->find<ShmTopic>(topic_name.c_str()).first;
@@ -248,13 +267,6 @@ void ShmManager::delete_subscriber(
         segment->destroy<ShmBlockingProcessing>(proc_name.c_str());
     }
 
-    // Remove liveness marker.
-    std::string liveness_name = "ShmSubscriberLiveness_" + std::to_string(id);
-    auto liveness_found = segment->find<ShmSubscriberLiveness>(liveness_name.c_str());
-    if (liveness_found.first != nullptr) {
-        segment->destroy<ShmSubscriberLiveness>(liveness_name.c_str());
-    }
-
     // Remove duplicate subscription info
     std::string info_name = "ShmSubscriberInfo_" + std::to_string(id);
     auto info_found = segment->find<ShmSubscriberInfo>(info_name.c_str());
@@ -270,6 +282,9 @@ bool ShmManager::publish(
     boost::interprocess::managed_shared_memory* segment) {
     auto mgr = segment->get_segment_manager();
     ShmIntAllocator int_alloc(mgr);
+    if (refcnt.load(std::memory_order_acquire) != 0) {
+        throw std::runtime_error("shared-memory message is already published or still referenced");
+    }
 
     std::string topic_name = "ShmTopic_" + topic;
     ShmTopic* topic_ptr = segment->find_or_construct<ShmTopic>(topic_name.c_str())(int_alloc);
@@ -284,11 +299,10 @@ bool ShmManager::publish(
 
     for (auto it = topic_ptr->subscribers.begin(); it != topic_ptr->subscribers.end(); ) {
         const auto sub_id = *it;
-        std::string liveness_name = "ShmSubscriberLiveness_" + std::to_string(sub_id);
-
         std::string info_name = "ShmSubscriberInfo_" + std::to_string(sub_id);
         ShmSubscriberInfo* info_ptr = segment->find<ShmSubscriberInfo>(info_name.c_str()).first;
-        bool subscriber_alive = info_ptr != nullptr && is_process_alive(info_ptr->owner_pid);
+        bool subscriber_alive = info_ptr != nullptr &&
+            is_process_alive(info_ptr->owner_pid, info_ptr->owner_start_time);
 
         if (!subscriber_alive) {
             std::string proc_name = "ShmBlockingProcessing_" + std::to_string(sub_id);
@@ -296,11 +310,6 @@ bool ShmManager::publish(
             ShmBlockingProcessing* proc_ptr = proc_found.first;
             if (proc_ptr != nullptr) {
                 release_pending_messages(proc_ptr, this, segment);
-                segment->destroy<ShmBlockingProcessing>(proc_name.c_str());
-            }
-            auto liveness_to_remove = segment->find<ShmSubscriberLiveness>(liveness_name.c_str());
-            if (liveness_to_remove.first != nullptr) {
-                segment->destroy<ShmSubscriberLiveness>(liveness_name.c_str());
             }
             if (info_ptr != nullptr) {
                 segment->destroy<ShmSubscriberInfo>(info_name.c_str());

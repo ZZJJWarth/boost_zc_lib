@@ -18,9 +18,40 @@ void ensure_shm_ready()
   zc_interop::ensure_shm_ready_or_throw();
 }
 
+size_t object_id_or_throw(const std::string & object_name)
+{
+  size_t id = 0;
+  if (!zc_interop::parse_object_name(object_name, id)) {
+    throw std::runtime_error("invalid object name: " + object_name);
+  }
+  return id;
+}
+
+void ensure_object_type(const std::string & object_name, ShmMessageType expected_type)
+{
+  const size_t id = object_id_or_throw(object_name);
+  const ShmMessageType actual_type = manager_->getMessageTypeById(id, shm);
+  if (actual_type != expected_type) {
+    throw std::runtime_error("shared-memory object type mismatch: " + object_name);
+  }
+}
+
+void require_c_contiguous(const py::buffer_info & info)
+{
+  py::ssize_t expected_stride = static_cast<py::ssize_t>(info.itemsize);
+  for (py::ssize_t i = info.ndim - 1; i >= 0; --i) {
+    if (info.shape[static_cast<size_t>(i)] > 1 &&
+        info.strides[static_cast<size_t>(i)] != expected_stride) {
+      throw std::runtime_error("buffer must be C-contiguous");
+    }
+    expected_stride *= info.shape[static_cast<size_t>(i)];
+  }
+}
+
 ShmImage * find_image_or_throw(const std::string & object_name)
 {
   ensure_shm_ready();
+  ensure_object_type(object_name, ShmMessageType::Image);
   ShmImage * image_ptr = shm->find<ShmImage>(object_name.c_str()).first;
   if (image_ptr == nullptr) {
     throw std::runtime_error("image object not found: " + object_name);
@@ -31,6 +62,7 @@ ShmImage * find_image_or_throw(const std::string & object_name)
 ShmPointCloud2 * find_pc2_or_throw(const std::string & object_name)
 {
   ensure_shm_ready();
+  ensure_object_type(object_name, ShmMessageType::PointCloud2);
   ShmPointCloud2 * pc2_ptr = shm->find<ShmPointCloud2>(object_name.c_str()).first;
   if (pc2_ptr == nullptr) {
     throw std::runtime_error("pointcloud2 object not found: " + object_name);
@@ -153,6 +185,7 @@ PYBIND11_MODULE(_zc_py_bridge, m)
         image->step = step;
 
         py::buffer_info info = data.request();
+        require_c_contiguous(info);
         const auto * src = static_cast<const uint8_t *>(info.ptr);
         const size_t total_size = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
         image->data.resize(total_size);
@@ -214,6 +247,7 @@ PYBIND11_MODULE(_zc_py_bridge, m)
         }
 
         py::buffer_info info = data.request();
+        require_c_contiguous(info);
         const auto * src = static_cast<const uint8_t *>(info.ptr);
         const size_t total_size = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
         pc2->data.resize(total_size);

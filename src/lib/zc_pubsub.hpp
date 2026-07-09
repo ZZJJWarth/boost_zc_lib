@@ -2,7 +2,6 @@
 
 #include <string>
 #include <memory>
-#include <cstdio>
 #include <unordered_map>
 #include <utility>
 #include <cstring>
@@ -94,6 +93,12 @@ public:
       return;
     }
 
+    size_t msg_id = 0;
+    if (!zc_interop::parse_object_name(msg_.data, msg_id) ||
+        manager_->getMessageTypeById(msg_id, shm) != ShmManager::message_type_for<ShmT>()) {
+      return;
+    }
+
     ShmT * clear_data = shm->find<ShmT>(msg_.data.c_str()).first;
     if (clear_data == nullptr) {
       return;
@@ -165,7 +170,6 @@ public:
       [this, cb = std::forward<CallbackT>(callback), subscriber_id](const std_msgs::msg::String & msg) mutable {
         MessageT out;
         if (!receive_message<MessageT>(msg, subscriber_id, out)) {
-          std::puts("Failed to find shared memory object");
           return;
         }
         cb(out);
@@ -199,20 +203,26 @@ public:
     const rclcpp::SubscriptionOptionsWithAllocator<std::allocator<void>> & options =
       rclcpp::SubscriptionOptionsWithAllocator<std::allocator<void>>())
   {
+    if (!zero_copy) {
+      throw std::invalid_argument(
+        "zero_copy=false is invalid for the zero-copy callback overload; "
+        "use the one-copy shared-memory subscription overload instead");
+    }
+
     size_t subscriber_id = ensure_subscriber_id(topic_name);
 
     using ShmT = typename ZcShmTraits<MessageT>::ShmType;
 
     std::function<void(const std_msgs::msg::String &)> wrapper =
-      [this, cb = std::forward<CallbackT>(callback), subscriber_id, zero_copy](const std_msgs::msg::String & msg) mutable {
-        if (!zero_copy) {
-          std::puts("Zero-copy flag is false, use the default shared-memory subscription overload instead.");
+      [this, cb = std::forward<CallbackT>(callback), subscriber_id](const std_msgs::msg::String & msg) mutable {
+        size_t msg_id = 0;
+        if (!zc_interop::parse_object_name(msg.data, msg_id) ||
+            manager_->getMessageTypeById(msg_id, shm) != ShmManager::message_type_for<ShmT>()) {
           return;
         }
 
         ShmT * data = shm->find<ShmT>(msg.data.c_str()).first;
         if (data == nullptr) {
-          std::puts("Failed to find shared memory object");
           return;
         }
 
@@ -276,7 +286,6 @@ private:
       return info.id;
     }
 
-    std::puts("Shared memory manager not initialized.");
     return 0;
   }
 
@@ -375,6 +384,12 @@ private:
     }
 
     using ShmT = typename ZcShmTraits<MessageT>::ShmType;
+    size_t msg_id = 0;
+    if (!zc_interop::parse_object_name(msg.data, msg_id) ||
+        manager_->getMessageTypeById(msg_id, shm) != ShmManager::message_type_for<ShmT>()) {
+      return false;
+    }
+
     ShmT * data = shm->find<ShmT>(msg.data.c_str()).first;
     if (data == nullptr) {
       return false;
@@ -436,12 +451,10 @@ public:
   void publish(ShmMsgT * data)
   {
     if (data == nullptr) {
-      std::puts("Shared memory message is null, skip publish.");
       return;
     }
 
     if (!manager_ || !shm) {
-      std::puts("Shared memory manager not initialized.");
       return;
     }
 

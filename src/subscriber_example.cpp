@@ -5,7 +5,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
 
-#include "lib/zc_pubsub.hpp"
+#include "zc_pubsub.hpp"
 
 using std::placeholders::_1;
 
