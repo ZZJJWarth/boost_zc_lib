@@ -2,9 +2,9 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>cpp_pubsub</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="2783245811@qq.com">wssstc</maintainer>
+  <version>0.1.0</version>
+  <description>Robonix shared-memory zero-copy transport for ROS 2 Image and PointCloud2 messages.</description>
+  <maintainer email="2783245811@qq.com">Robonix</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

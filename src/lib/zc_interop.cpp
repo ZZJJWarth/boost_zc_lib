@@ -46,7 +46,15 @@ void erase_from_processing_queue(size_t subscriber_id, size_t msg_id)
   }
 
   scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
-  proc_ptr->myMessage.erase(msg_id);
+  auto found = proc_ptr->myMessage.find(msg_id);
+  if (found == proc_ptr->myMessage.end()) {
+    return;
+  }
+  if (found->second <= 1) {
+    proc_ptr->myMessage.erase(found);
+    return;
+  }
+  --found->second;
 }
 
 bool prepare_publish(const std::string & topic_name, const std::string & object_name)
@@ -59,7 +67,15 @@ bool prepare_publish(const std::string & topic_name, const std::string & object_
   }
 
   if (auto * image_ptr = shm->find<ShmImage>(object_name.c_str()).first) {
-    if (!manager_->publish(topic_name.c_str(), id, image_ptr->ref_cnt, shm)) {
+    bool published = false;
+    try {
+      published = manager_->publish(topic_name.c_str(), id, image_ptr->ref_cnt, shm);
+    } catch (...) {
+      manager_->removeMessageFromTopic(topic_name.c_str(), id, shm);
+      manager_->releaseMessage(image_ptr, shm, true);
+      throw;
+    }
+    if (!published) {
       manager_->releaseMessage(image_ptr, shm, true);
       return false;
     }
@@ -67,7 +83,15 @@ bool prepare_publish(const std::string & topic_name, const std::string & object_
   }
 
   if (auto * pc2_ptr = shm->find<ShmPointCloud2>(object_name.c_str()).first) {
-    if (!manager_->publish(topic_name.c_str(), id, pc2_ptr->ref_cnt, shm)) {
+    bool published = false;
+    try {
+      published = manager_->publish(topic_name.c_str(), id, pc2_ptr->ref_cnt, shm);
+    } catch (...) {
+      manager_->removeMessageFromTopic(topic_name.c_str(), id, shm);
+      manager_->releaseMessage(pc2_ptr, shm, true);
+      throw;
+    }
+    if (!published) {
       manager_->releaseMessage(pc2_ptr, shm, true);
       return false;
     }
@@ -75,6 +99,27 @@ bool prepare_publish(const std::string & topic_name, const std::string & object_
   }
 
   throw std::runtime_error("shared-memory object not found: " + object_name);
+}
+
+void rollback_publish(const std::string & topic_name, const std::string & object_name)
+{
+  ensure_shm_ready_or_throw();
+
+  size_t id = 0;
+  if (!parse_object_name(object_name, id)) {
+    return;
+  }
+
+  manager_->removeMessageFromTopic(topic_name.c_str(), id, shm);
+
+  if (auto * image_ptr = shm->find<ShmImage>(object_name.c_str()).first) {
+    manager_->releaseMessage(image_ptr, shm, true);
+    return;
+  }
+
+  if (auto * pc2_ptr = shm->find<ShmPointCloud2>(object_name.c_str()).first) {
+    manager_->releaseMessage(pc2_ptr, shm, true);
+  }
 }
 
 }  // namespace zc_interop

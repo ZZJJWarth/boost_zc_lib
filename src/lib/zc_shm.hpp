@@ -15,10 +15,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <sys/types.h>
 #include <string>
 #include <cerrno>
 #include <memory>
 #include <pthread.h>
+#include <utility>
 
 using namespace boost::interprocess;
 
@@ -51,6 +53,9 @@ using ShmScopedCharAllocator = boost::container::scoped_allocator_adaptor<ShmCha
 using ShmString = basic_string<char, std::char_traits<char>, ShmCharAllocator>;
 using ShmIntAllocator = allocator<size_t, managed_shared_memory::segment_manager>;
 using ShmSet = set<size_t, std::less<size_t>, ShmIntAllocator>;
+using ShmMessageCountPair = std::pair<const size_t, size_t>;
+using ShmMessageCountAllocator = allocator<ShmMessageCountPair, managed_shared_memory::segment_manager>;
+using ShmMessageCountMap = map<size_t, size_t, std::less<size_t>, ShmMessageCountAllocator>;
 
 struct ShmTime {
     int32_t sec;
@@ -202,14 +207,15 @@ struct ShmPointCloud2 { //内存内名称：ShmObject_[myId]
 };
 struct ShmBlockingProcessing{//内存内名称：ShmBlockingProcessing_[subscriber_id]
     interprocess_mutex mutex;
-    ShmSet myMessage;
+    ShmMessageCountMap myMessage;
 
     /**
      * @brief 构造订阅者阻塞队列容器。
      * @param alloc 用于存储消息 ID 集合的分配器。
      */
     explicit ShmBlockingProcessing(const ShmIntAllocator& alloc)
-        : mutex(), myMessage(std::less<size_t>(), alloc) {}
+        : mutex(),
+          myMessage(std::less<size_t>(), ShmMessageCountAllocator(alloc.get_segment_manager())) {}
 };
 struct ShmTopic {//内存内名称：ShmTopic_[topic]
     interprocess_mutex mutex;
@@ -227,11 +233,12 @@ struct ShmTopic {//内存内名称：ShmTopic_[topic]
 // 每个订阅者的重复订阅计数（同一节点同一topic多次订阅）
 struct ShmSubscriberInfo { // 内存内名称：ShmSubscriberInfo_[id]
     std::atomic_size_t dup_cnt;
+    pid_t owner_pid;
 
     /**
      * @brief 构造订阅者重复订阅信息，默认重复计数为 1。
      */
-    ShmSubscriberInfo() : dup_cnt(1) {}
+    ShmSubscriberInfo() : dup_cnt(1), owner_pid(0) {}
 };
 
 struct ShmManager {//内存内名称：ShmManager
@@ -265,7 +272,11 @@ struct ShmManager {//内存内名称：ShmManager
             segment->destroy<ShmMsgT>(obj_name.c_str());
             return;
         }
-        size_t previous = data->ref_cnt.fetch_sub(1, std::memory_order_acq_rel);
+        size_t previous = data->ref_cnt.load(std::memory_order_acquire);
+        while (previous != 0 &&
+               !data->ref_cnt.compare_exchange_weak(
+                 previous, previous - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
         if (previous == 1) {
             std::printf("Message %zu has released\n", data->myId);
             std::string obj_name = "ShmObject_" + std::to_string(data->myId);
@@ -315,6 +326,19 @@ struct ShmManager {//内存内名称：ShmManager
      * @param segment 共享内存段对象。
      */
     void releaseMessageById(size_t msg_id, managed_shared_memory* segment);
+
+    /**
+     * @brief 根据消息 ID 查找并释放共享内存消息多次。
+     * @param msg_id 消息对象 ID。
+     * @param count 释放次数。
+     * @param segment 共享内存段对象。
+     */
+    void releaseMessageById(size_t msg_id, size_t count, managed_shared_memory* segment);
+
+    /**
+     * @brief 从指定 topic 的所有订阅者 pending 队列中移除消息 ID。
+     */
+    void removeMessageFromTopic(const string &topic, size_t msg_id, managed_shared_memory* segment);
 
     /**
      * @brief 为指定 topic 新增订阅者并初始化订阅者相关资源。

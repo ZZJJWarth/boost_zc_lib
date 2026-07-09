@@ -10,6 +10,7 @@ option(ROBONIX_ZC_BUILD_EXAMPLES "Build cpp_pubsub example executables" OFF)
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+find_package(Threads REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -29,6 +30,7 @@ target_include_directories(robonix_zc PUBLIC
   "$<INSTALL_INTERFACE:include/${PROJECT_NAME}>")
 ament_target_dependencies(robonix_zc rclcpp std_msgs sensor_msgs)
 target_link_libraries(robonix_zc iceoryx_posh::iceoryx_posh)
+target_link_libraries(robonix_zc Threads::Threads)
 
 # 安装头文件，供下游 find_package(cpp_pubsub) 后 #include
 install(DIRECTORY src/lib/

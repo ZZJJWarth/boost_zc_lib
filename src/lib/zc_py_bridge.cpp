@@ -139,24 +139,29 @@ PYBIND11_MODULE(_zc_py_bridge, m)
        const std::string & encoding,
        uint8_t is_bigendian,
        uint32_t step,
-       py::buffer data) -> std::string {
+      py::buffer data) -> std::string {
       ensure_shm_ready();
       auto * image = manager_->ShmImageGetNew(shm);
-      image->header.stamp.sec = stamp_sec;
-      image->header.stamp.nanosec = stamp_nanosec;
-      image->header.frame_id = frame_id.c_str();
-      image->width = width;
-      image->height = height;
-      image->encoding = encoding.c_str();
-      image->is_bigendian = is_bigendian;
-      image->step = step;
+      try {
+        image->header.stamp.sec = stamp_sec;
+        image->header.stamp.nanosec = stamp_nanosec;
+        image->header.frame_id = frame_id.c_str();
+        image->width = width;
+        image->height = height;
+        image->encoding = encoding.c_str();
+        image->is_bigendian = is_bigendian;
+        image->step = step;
 
-      py::buffer_info info = data.request();
-      const auto * src = static_cast<const uint8_t *>(info.ptr);
-      const size_t total_size = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
-      image->data.resize(total_size);
-      if (total_size > 0) {
-        std::memcpy(image->data.data(), src, total_size);
+        py::buffer_info info = data.request();
+        const auto * src = static_cast<const uint8_t *>(info.ptr);
+        const size_t total_size = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+        image->data.resize(total_size);
+        if (total_size > 0) {
+          std::memcpy(image->data.data(), src, total_size);
+        }
+      } catch (...) {
+        manager_->releaseMessage(image, shm, true);
+        throw;
       }
       return zc_interop::make_object_name(image->myId);
     },
@@ -182,37 +187,42 @@ PYBIND11_MODULE(_zc_py_bridge, m)
        uint32_t point_step,
        uint32_t row_step,
        uint8_t is_dense,
-       py::buffer data) -> std::string {
+      py::buffer data) -> std::string {
       ensure_shm_ready();
       auto * pc2 = manager_->ShmPointCloud2GetNew(shm);
-      pc2->header.stamp.sec = stamp_sec;
-      pc2->header.stamp.nanosec = stamp_nanosec;
-      pc2->header.frame_id = frame_id.c_str();
-      pc2->height = height;
-      pc2->width = width;
-      pc2->is_bigendian = is_bigendian;
-      pc2->point_step = point_step;
-      pc2->row_step = row_step;
-      pc2->is_dense = is_dense;
+      try {
+        pc2->header.stamp.sec = stamp_sec;
+        pc2->header.stamp.nanosec = stamp_nanosec;
+        pc2->header.frame_id = frame_id.c_str();
+        pc2->height = height;
+        pc2->width = width;
+        pc2->is_bigendian = is_bigendian;
+        pc2->point_step = point_step;
+        pc2->row_step = row_step;
+        pc2->is_dense = is_dense;
 
-      pc2->fields.clear();
-      pc2->fields.reserve(static_cast<size_t>(py::len(fields)));
-      for (const auto & item : fields) {
-        py::dict f = py::cast<py::dict>(item);
-        ShmPointField out_field(ShmCharAllocator(shm->get_segment_manager()));
-        out_field.name = py::cast<std::string>(f["name"]).c_str();
-        out_field.offset = py::cast<uint32_t>(f["offset"]);
-        out_field.datatype = py::cast<uint8_t>(f["datatype"]);
-        out_field.count = py::cast<uint32_t>(f["count"]);
-        pc2->fields.push_back(std::move(out_field));
-      }
+        pc2->fields.clear();
+        pc2->fields.reserve(static_cast<size_t>(py::len(fields)));
+        for (const auto & item : fields) {
+          py::dict f = py::cast<py::dict>(item);
+          ShmPointField out_field(ShmCharAllocator(shm->get_segment_manager()));
+          out_field.name = py::cast<std::string>(f["name"]).c_str();
+          out_field.offset = py::cast<uint32_t>(f["offset"]);
+          out_field.datatype = py::cast<uint8_t>(f["datatype"]);
+          out_field.count = py::cast<uint32_t>(f["count"]);
+          pc2->fields.push_back(std::move(out_field));
+        }
 
-      py::buffer_info info = data.request();
-      const auto * src = static_cast<const uint8_t *>(info.ptr);
-      const size_t total_size = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
-      pc2->data.resize(total_size);
-      if (total_size > 0) {
-        std::memcpy(pc2->data.data(), src, total_size);
+        py::buffer_info info = data.request();
+        const auto * src = static_cast<const uint8_t *>(info.ptr);
+        const size_t total_size = static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+        pc2->data.resize(total_size);
+        if (total_size > 0) {
+          std::memcpy(pc2->data.data(), src, total_size);
+        }
+      } catch (...) {
+        manager_->releaseMessage(pc2, shm, true);
+        throw;
       }
       return zc_interop::make_object_name(pc2->myId);
     },
@@ -232,6 +242,14 @@ PYBIND11_MODULE(_zc_py_bridge, m)
     "prepare_publish",
     [](const std::string & topic_name, const std::string & object_name) -> bool {
       return zc_interop::prepare_publish(topic_name, object_name);
+    },
+    py::arg("topic_name"),
+    py::arg("object_name"));
+
+  m.def(
+    "rollback_publish",
+    [](const std::string & topic_name, const std::string & object_name) {
+      zc_interop::rollback_publish(topic_name, object_name);
     },
     py::arg("topic_name"),
     py::arg("object_name"));

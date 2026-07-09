@@ -135,7 +135,11 @@ class ZcPyPublisher:
 
         out = String()
         out.data = object_name
-        self._pub.publish(out)
+        try:
+            self._pub.publish(out)
+        except Exception:
+            bridge.rollback_publish(self._shm_topic_name, object_name)
+            raise
         return True
 
 

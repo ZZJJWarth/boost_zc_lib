@@ -11,6 +11,7 @@
 #include <vector>
 #include <type_traits>
 
+#include "rclcpp/expand_topic_or_service_name.hpp"
 #include "rclcpp/publisher.hpp"
 #include "rclcpp/qos.hpp"
 #include "rclcpp/publisher_options.hpp"
@@ -57,7 +58,56 @@ void erase_from_processing_queue(size_t subscriber_id, size_t msg_id);
 
 bool prepare_publish(const std::string & topic_name, const std::string & object_name);
 
+void rollback_publish(const std::string & topic_name, const std::string & object_name);
+
 }  // namespace zc_interop
+
+inline std::string zc_shm_topic_key_from_fqn(const std::string & topic_name)
+{
+  if (!topic_name.empty() && topic_name.front() == '/') {
+    return topic_name.substr(1);
+  }
+  return topic_name;
+}
+
+template<typename ShmT>
+class ZcCleanupState
+{
+public:
+  ZcCleanupState(size_t subscriber_id, std_msgs::msg::String msg)
+  : subscriber_id_(subscriber_id), msg_(std::move(msg))
+  {}
+
+  ~ZcCleanupState()
+  {
+    clear();
+  }
+
+  void clear()
+  {
+    if (cleared_) {
+      return;
+    }
+    cleared_ = true;
+
+    if (!manager_ || !shm || subscriber_id_ == 0) {
+      return;
+    }
+
+    ShmT * clear_data = shm->find<ShmT>(msg_.data.c_str()).first;
+    if (clear_data == nullptr) {
+      return;
+    }
+
+    zc_interop::erase_from_processing_queue(subscriber_id_, clear_data->myId);
+    manager_->releaseMessage(clear_data, shm);
+  }
+
+private:
+  size_t subscriber_id_;
+  std_msgs::msg::String msg_;
+  bool cleared_{false};
+};
 
 class ZcNode : public rclcpp::Node
 {
@@ -166,31 +216,9 @@ public:
           return;
         }
 
-        auto cleared = std::make_shared<bool>(false);
-        std::function<void()> clear = [subscriber_id, msg, cleared]() {
-          if (*cleared) {
-            return;
-          }
-
-          if (!manager_ || !shm || subscriber_id == 0) {
-            return;
-          }
-
-          ShmT * clear_data = shm->find<ShmT>(msg.data.c_str()).first;
-          if (clear_data == nullptr) {
-            return;
-          }
-
-          std::string proc_name = "ShmBlockingProcessing_" + std::to_string(subscriber_id);
-          auto proc_found = shm->find<ShmBlockingProcessing>(proc_name.c_str());
-          ShmBlockingProcessing * proc_ptr = proc_found.first;
-          if (proc_ptr != nullptr) {
-            scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
-            proc_ptr->myMessage.erase(clear_data->myId);
-          }
-
-          manager_->releaseMessage(clear_data, shm);
-          *cleared = true;
+        auto cleanup_state = std::make_shared<ZcCleanupState<ShmT>>(subscriber_id, msg);
+        std::function<void()> clear = [cleanup_state]() {
+          cleanup_state->clear();
         };
 
         cb(msg, clear);
@@ -236,9 +264,10 @@ private:
   size_t ensure_subscriber_id(const std::string & topic_name)
   {
     if (manager_ && shm) {
-      auto & info = subscriber_ids_[topic_name];
+      const std::string shm_topic_name = make_shm_topic_key(topic_name);
+      auto & info = subscriber_ids_[shm_topic_name];
       if (info.count == 0) {
-        info.id = manager_->add_subscriber(topic_name.c_str(), shm);
+        info.id = manager_->add_subscriber(shm_topic_name.c_str(), shm);
       }
       ++info.count;
       if (info.count > 1) {
@@ -249,6 +278,13 @@ private:
 
     std::puts("Shared memory manager not initialized.");
     return 0;
+  }
+
+  std::string make_shm_topic_key(const std::string & topic_name) const
+  {
+    return zc_shm_topic_key_from_fqn(
+      rclcpp::expand_topic_or_service_name(
+        topic_name, get_name(), get_effective_namespace(), false));
   }
 
   /**
@@ -350,8 +386,7 @@ private:
     auto proc_found = shm->find<ShmBlockingProcessing>(proc_name.c_str());
     ShmBlockingProcessing * proc_ptr = proc_found.first;
     if (proc_ptr != nullptr) {
-      scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
-      proc_ptr->myMessage.erase(data->myId);
+      zc_interop::erase_from_processing_queue(subscriber_id, data->myId);
     }
 
     manager_->releaseMessage(data, shm);
@@ -412,8 +447,16 @@ public:
 
     // 得到topic名称，+1除去开头的斜杠
     const char * full = Base::get_topic_name();
-    const char * topic_name = full && *full == '/' ? full + 1 : full;
-    if (!manager_->publish(topic_name, data->myId, data->ref_cnt, shm)) {
+    const std::string topic_name = zc_shm_topic_key_from_fqn(full == nullptr ? "" : full);
+    bool published = false;
+    try {
+      published = manager_->publish(topic_name.c_str(), data->myId, data->ref_cnt, shm);
+    } catch (...) {
+      manager_->removeMessageFromTopic(topic_name.c_str(), data->myId, shm);
+      manager_->releaseMessage(data, shm, true);
+      throw;
+    }
+    if (!published) {
       // 没有订阅者时不会设置有效 ref_cnt，直接强制回收避免引用计数下溢。
       manager_->releaseMessage(data, shm, true);
       return;
@@ -421,7 +464,13 @@ public:
 
     std_msgs::msg::String msg;
     msg.data = "ShmObject_" + std::to_string(data->myId);
-    Base::publish(msg);
+    try {
+      Base::publish(msg);
+    } catch (...) {
+      manager_->removeMessageFromTopic(topic_name.c_str(), data->myId, shm);
+      manager_->releaseMessage(data, shm, true);
+      throw;
+    }
   }
 };
 

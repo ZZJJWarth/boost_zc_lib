@@ -1,12 +1,48 @@
 #include "zc_shm.hpp"
 
+#include <cerrno>
+#include <csignal>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
+#include <utility>
+#include <unistd.h>
 
 // ── 全局变量定义 ─────────────────────────────────────────────────────────────
 
 managed_shared_memory * shm = nullptr;
 ShmManager * manager_ = nullptr;
+
+namespace {
+
+size_t local_shm_ref_count = 0;
+std::string local_shm_name;
+
+bool is_process_alive(pid_t pid)
+{
+    if (pid <= 0) {
+        return false;
+    }
+    return kill(pid, 0) == 0 || errno == EPERM;
+}
+
+void release_pending_messages(
+    ShmBlockingProcessing* proc_ptr,
+    ShmManager* manager,
+    managed_shared_memory* segment)
+{
+    if (proc_ptr == nullptr) {
+        return;
+    }
+
+    scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
+    for (const auto & msg_count : proc_ptr->myMessage) {
+        manager->releaseMessageById(msg_count.first, msg_count.second, segment);
+    }
+    proc_ptr->myMessage.clear();
+}
+
+}  // namespace
 
 // ── ShmSubscriberLiveness ────────────────────────────────────────────────────
 
@@ -26,18 +62,35 @@ ShmSubscriberLiveness::~ShmSubscriberLiveness() {
 // ── shm_init / shm_shutdown ──────────────────────────────────────────────────
 
 void shm_init(string name, size_t size) {
+    if (shm != nullptr) {
+        if (name != local_shm_name) {
+            throw std::runtime_error("shared memory is already initialized with a different name");
+        }
+        manager_->user_cnt.fetch_add(1, std::memory_order_relaxed);
+        ++local_shm_ref_count;
+        return;
+    }
+
     shm = new managed_shared_memory(open_or_create, name.c_str(), size);
     manager_ = shm->find_or_construct<ShmManager>("ShmManager")();
     manager_->user_cnt.fetch_add(1, std::memory_order_relaxed);
+    local_shm_name = name;
+    local_shm_ref_count = 1;
 }
 
 void shm_shutdown(string name) {
     if (manager_ && shm) {
-        if (manager_->user_cnt.fetch_sub(1, std::memory_order_relaxed) == 1) {
-            // Last user, clean up shared memory
+        const bool last_user = manager_->user_cnt.fetch_sub(1, std::memory_order_acq_rel) == 1;
+        if (local_shm_ref_count > 0) {
+            --local_shm_ref_count;
+        }
+        if (local_shm_ref_count == 0) {
             delete shm;
             shm = nullptr;
             manager_ = nullptr;
+            local_shm_name.clear();
+        }
+        if (last_user) {
             shared_memory_object::remove(name.c_str());
             puts("All the Shared memory has been cleaned up.");
         }
@@ -55,15 +108,46 @@ ShmPointCloud2* ShmManager::ShmPointCloud2GetNew(managed_shared_memory* segment)
 }
 
 void ShmManager::releaseMessageById(size_t msg_id, managed_shared_memory* segment) {
+    releaseMessageById(msg_id, 1, segment);
+}
+
+void ShmManager::releaseMessageById(size_t msg_id, size_t count, managed_shared_memory* segment) {
     std::string obj_name = "ShmObject_" + std::to_string(msg_id);
     ShmImage* image_ptr = segment->find<ShmImage>(obj_name.c_str()).first;
     if (image_ptr != nullptr) {
-        releaseMessage(image_ptr, segment);
+        for (size_t i = 0; i < count; ++i) {
+            releaseMessage(image_ptr, segment);
+        }
         return;
     }
     ShmPointCloud2* pc2_ptr = segment->find<ShmPointCloud2>(obj_name.c_str()).first;
     if (pc2_ptr != nullptr) {
-        releaseMessage(pc2_ptr, segment);
+        for (size_t i = 0; i < count; ++i) {
+            releaseMessage(pc2_ptr, segment);
+        }
+    }
+}
+
+void ShmManager::removeMessageFromTopic(
+    const string &topic,
+    size_t msg_id,
+    managed_shared_memory* segment)
+{
+    std::string topic_name = "ShmTopic_" + topic;
+    ShmTopic* topic_ptr = segment->find<ShmTopic>(topic_name.c_str()).first;
+    if (topic_ptr == nullptr) {
+        return;
+    }
+
+    scoped_lock<interprocess_mutex> topic_lock(topic_ptr->mutex);
+    for (const auto & sub_id : topic_ptr->subscribers) {
+        std::string proc_name = "ShmBlockingProcessing_" + std::to_string(sub_id);
+        ShmBlockingProcessing* proc_ptr = segment->find<ShmBlockingProcessing>(proc_name.c_str()).first;
+        if (proc_ptr == nullptr) {
+            continue;
+        }
+        scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
+        proc_ptr->myMessage.erase(msg_id);
     }
 }
 
@@ -96,12 +180,14 @@ size_t ShmManager::add_subscriber(const string &topic, managed_shared_memory* se
     ShmSubscriberLiveness* liveness_ptr =
         segment->find_or_construct<ShmSubscriberLiveness>(liveness_name.c_str())();
 
-    // Lock the mutex to signal this subscriber is alive
-    pthread_mutex_lock(&liveness_ptr->mutex);
+    // The liveness object is kept for shared-memory layout compatibility.
+    (void)liveness_ptr;
 
     // Initialize duplicate subscription counter to 1
     std::string info_name = "ShmSubscriberInfo_" + std::to_string(id);
-    segment->find_or_construct<ShmSubscriberInfo>(info_name.c_str())();
+    ShmSubscriberInfo* info_ptr = segment->find_or_construct<ShmSubscriberInfo>(info_name.c_str())();
+    info_ptr->dup_cnt.store(1, std::memory_order_relaxed);
+    info_ptr->owner_pid = getpid();
 
     return id;
 }
@@ -136,21 +222,14 @@ void ShmManager::delete_subscriber(const string& topic, size_t id, managed_share
     auto proc_found = segment->find<ShmBlockingProcessing>(proc_name.c_str());
     ShmBlockingProcessing* proc_ptr = proc_found.first;
     if (proc_ptr != nullptr) {
-        {
-            scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
-            for (const auto &msg_id : proc_ptr->myMessage) {
-                releaseMessageById(msg_id, segment);
-            }
-            proc_ptr->myMessage.clear();
-        }
+        release_pending_messages(proc_ptr, this, segment);
         segment->destroy<ShmBlockingProcessing>(proc_name.c_str());
     }
 
-    // Unlock and remove liveness mutex.
+    // Remove liveness marker.
     std::string liveness_name = "ShmSubscriberLiveness_" + std::to_string(id);
     auto liveness_found = segment->find<ShmSubscriberLiveness>(liveness_name.c_str());
     if (liveness_found.first != nullptr) {
-        pthread_mutex_unlock(&liveness_found.first->mutex);
         segment->destroy<ShmSubscriberLiveness>(liveness_name.c_str());
     }
 
@@ -180,63 +259,41 @@ bool ShmManager::publish(const string &topic, size_t myid, std::atomic_size_t &r
         const auto sub_id = *it;
         std::string liveness_name = "ShmSubscriberLiveness_" + std::to_string(sub_id);
 
-        bool subscriber_alive = true;
-        auto liveness_found = segment->find<ShmSubscriberLiveness>(liveness_name.c_str());
-
-        if (liveness_found.first == nullptr) {
-            subscriber_alive = false;
-        } else {
-            ShmSubscriberLiveness* liveness_ptr = liveness_found.first;
-            // Try to acquire the lock without blocking using trylock
-            int lock_ret = pthread_mutex_trylock(&liveness_ptr->mutex);
-
-            if (lock_ret == EOWNERDEAD) {
-                // Owner died while holding the lock
-                subscriber_alive = false;
-                pthread_mutex_consistent(&liveness_ptr->mutex);
-                pthread_mutex_unlock(&liveness_ptr->mutex);
-            } else if (lock_ret == 0) {
-                // Successfully acquired the lock, subscriber is dead
-                subscriber_alive = false;
-                pthread_mutex_unlock(&liveness_ptr->mutex);
-            } else if (lock_ret == EBUSY) {
-                // Lock is busy, subscriber is alive
-                subscriber_alive = true;
-            } else {
-                // Some other error occurred
-                subscriber_alive = false;
-            }
-        }
+        std::string info_name = "ShmSubscriberInfo_" + std::to_string(sub_id);
+        ShmSubscriberInfo* info_ptr = segment->find<ShmSubscriberInfo>(info_name.c_str()).first;
+        bool subscriber_alive = info_ptr != nullptr && is_process_alive(info_ptr->owner_pid);
 
         if (!subscriber_alive) {
             std::string proc_name = "ShmBlockingProcessing_" + std::to_string(sub_id);
             auto proc_found = segment->find<ShmBlockingProcessing>(proc_name.c_str());
             ShmBlockingProcessing* proc_ptr = proc_found.first;
             if (proc_ptr != nullptr) {
-                {
-                    scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
-                    for (const auto &msg_id : proc_ptr->myMessage) {
-                        releaseMessageById(msg_id, segment);
-                    }
-                    proc_ptr->myMessage.clear();
-                }
+                release_pending_messages(proc_ptr, this, segment);
                 segment->destroy<ShmBlockingProcessing>(proc_name.c_str());
             }
             auto liveness_to_remove = segment->find<ShmSubscriberLiveness>(liveness_name.c_str());
             if (liveness_to_remove.first != nullptr) {
                 segment->destroy<ShmSubscriberLiveness>(liveness_name.c_str());
             }
+            if (info_ptr != nullptr) {
+                segment->destroy<ShmSubscriberInfo>(info_name.c_str());
+            }
             it = topic_ptr->subscribers.erase(it);
             continue;
         }
 
         // 根据重复订阅计数增加权重
-        size_t dup = get_subscriber_dup(sub_id, segment);
+        size_t dup = info_ptr->dup_cnt.load(std::memory_order_relaxed);
 
         std::string proc_name = "ShmBlockingProcessing_" + std::to_string(sub_id);
         ShmBlockingProcessing* proc_ptr = segment->find_or_construct<ShmBlockingProcessing>(proc_name.c_str())(int_alloc);
         scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
-        proc_ptr->myMessage.insert(myid);
+        auto found = proc_ptr->myMessage.find(myid);
+        if (found == proc_ptr->myMessage.end()) {
+            proc_ptr->myMessage.insert(std::make_pair(myid, dup));
+        } else {
+            found->second += dup;
+        }
         actual_subscribers += dup;
         ++it;
     }
