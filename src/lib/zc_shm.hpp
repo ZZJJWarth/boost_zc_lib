@@ -22,10 +22,6 @@
 #include <pthread.h>
 #include <utility>
 
-using namespace boost::interprocess;
-
-struct ShmTopic;
-
 // 在共享内存中存储pthread_mutex_t的包装结构体
 struct ShmSubscriberLiveness {
     pthread_mutex_t mutex;
@@ -42,20 +38,30 @@ struct ShmSubscriberLiveness {
     ~ShmSubscriberLiveness();
 };
 
-using namespace boost::interprocess;
-
 struct ShmTopic;
 
-using Shmuint8Allocator = allocator<uint8_t, managed_shared_memory::segment_manager>;
-using Shmuint8Vector    = vector<uint8_t, Shmuint8Allocator>;
-using ShmCharAllocator = allocator<char, managed_shared_memory::segment_manager>;
+using Shmuint8Allocator = boost::interprocess::allocator<
+  uint8_t,
+  boost::interprocess::managed_shared_memory::segment_manager>;
+using Shmuint8Vector = boost::interprocess::vector<uint8_t, Shmuint8Allocator>;
+using ShmCharAllocator = boost::interprocess::allocator<
+  char,
+  boost::interprocess::managed_shared_memory::segment_manager>;
 using ShmScopedCharAllocator = boost::container::scoped_allocator_adaptor<ShmCharAllocator>;
-using ShmString = basic_string<char, std::char_traits<char>, ShmCharAllocator>;
-using ShmIntAllocator = allocator<size_t, managed_shared_memory::segment_manager>;
-using ShmSet = set<size_t, std::less<size_t>, ShmIntAllocator>;
+using ShmString = boost::interprocess::basic_string<char, std::char_traits<char>, ShmCharAllocator>;
+using ShmIntAllocator = boost::interprocess::allocator<
+  size_t,
+  boost::interprocess::managed_shared_memory::segment_manager>;
+using ShmSet = boost::interprocess::set<size_t, std::less<size_t>, ShmIntAllocator>;
 using ShmMessageCountPair = std::pair<const size_t, size_t>;
-using ShmMessageCountAllocator = allocator<ShmMessageCountPair, managed_shared_memory::segment_manager>;
-using ShmMessageCountMap = map<size_t, size_t, std::less<size_t>, ShmMessageCountAllocator>;
+using ShmMessageCountAllocator = boost::interprocess::allocator<
+  ShmMessageCountPair,
+  boost::interprocess::managed_shared_memory::segment_manager>;
+using ShmMessageCountMap = boost::interprocess::map<
+  size_t,
+  size_t,
+  std::less<size_t>,
+  ShmMessageCountAllocator>;
 
 struct ShmTime {
     int32_t sec;
@@ -95,7 +101,7 @@ struct ShmImage {//内存内名称：ShmObject_[myId]
          * @brief 构造共享内存图像对象并绑定共享内存分配器。
          * @param mgr 共享内存 segment manager。
          */
-    ShmImage(managed_shared_memory::segment_manager* mgr)
+    ShmImage(boost::interprocess::managed_shared_memory::segment_manager* mgr)
             : myId(0),
               ref_cnt(0),
                 header(ShmCharAllocator(mgr)),
@@ -168,7 +174,9 @@ struct ShmPointField {
         : ShmPointField(std::move(other), alloc.outer_allocator()) {}
 };
 
-using ShmPointFieldAllocator = allocator<ShmPointField, managed_shared_memory::segment_manager>;
+using ShmPointFieldAllocator = boost::interprocess::allocator<
+  ShmPointField,
+  boost::interprocess::managed_shared_memory::segment_manager>;
 using ShmScopedPointFieldAllocator = boost::container::scoped_allocator_adaptor<
     ShmPointFieldAllocator,
     ShmCharAllocator>;
@@ -192,7 +200,7 @@ struct ShmPointCloud2 { //内存内名称：ShmObject_[myId]
          * @brief 构造共享内存点云对象并绑定容器分配器。
          * @param mgr 共享内存 segment manager。
          */
-    explicit ShmPointCloud2(managed_shared_memory::segment_manager* mgr)
+    explicit ShmPointCloud2(boost::interprocess::managed_shared_memory::segment_manager* mgr)
             : myId(0),
               ref_cnt(0),
               header(ShmCharAllocator(mgr)),
@@ -206,7 +214,7 @@ struct ShmPointCloud2 { //内存内名称：ShmObject_[myId]
               is_dense(0) {}
 };
 struct ShmBlockingProcessing{//内存内名称：ShmBlockingProcessing_[subscriber_id]
-    interprocess_mutex mutex;
+    boost::interprocess::interprocess_mutex mutex;
     ShmMessageCountMap myMessage;
 
     /**
@@ -218,7 +226,7 @@ struct ShmBlockingProcessing{//内存内名称：ShmBlockingProcessing_[subscrib
           myMessage(std::less<size_t>(), ShmMessageCountAllocator(alloc.get_segment_manager())) {}
 };
 struct ShmTopic {//内存内名称：ShmTopic_[topic]
-    interprocess_mutex mutex;
+    boost::interprocess::interprocess_mutex mutex;
     ShmSet subscribers;
 
     /**
@@ -262,7 +270,10 @@ struct ShmManager {//内存内名称：ShmManager
      * @param segment 共享内存段对象。
      * @param force_mode 是否强制销毁（忽略引用计数）。
      */
-    void releaseMessage(ShmMsgT* data, managed_shared_memory* segment, bool force_mode = false)
+    void releaseMessage(
+      ShmMsgT* data,
+      boost::interprocess::managed_shared_memory* segment,
+      bool force_mode = false)
     {
         if (data == nullptr) {
             return;
@@ -290,7 +301,7 @@ struct ShmManager {//内存内名称：ShmManager
      * @param segment 共享内存段对象。
      * @return ShmMsgT* 新创建的共享内存消息指针。
      */
-    ShmMsgT* ShmMessageGetNew(managed_shared_memory* segment)
+    ShmMsgT* ShmMessageGetNew(boost::interprocess::managed_shared_memory* segment)
     {
         auto alloc = segment->get_segment_manager();
 
@@ -311,21 +322,21 @@ struct ShmManager {//内存内名称：ShmManager
      * @param segment 共享内存段对象。
      * @return ShmImage* 新建图像消息指针。
      */
-    ShmImage* ShmImageGetNew(managed_shared_memory* segment);
+    ShmImage* ShmImageGetNew(boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 新建共享内存点云消息。
      * @param segment 共享内存段对象。
      * @return ShmPointCloud2* 新建点云消息指针。
      */
-    ShmPointCloud2* ShmPointCloud2GetNew(managed_shared_memory* segment);
+    ShmPointCloud2* ShmPointCloud2GetNew(boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 根据消息 ID 查找并释放共享内存消息。
      * @param msg_id 消息对象 ID。
      * @param segment 共享内存段对象。
      */
-    void releaseMessageById(size_t msg_id, managed_shared_memory* segment);
+    void releaseMessageById(size_t msg_id, boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 根据消息 ID 查找并释放共享内存消息多次。
@@ -333,12 +344,18 @@ struct ShmManager {//内存内名称：ShmManager
      * @param count 释放次数。
      * @param segment 共享内存段对象。
      */
-    void releaseMessageById(size_t msg_id, size_t count, managed_shared_memory* segment);
+    void releaseMessageById(
+      size_t msg_id,
+      size_t count,
+      boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 从指定 topic 的所有订阅者 pending 队列中移除消息 ID。
      */
-    void removeMessageFromTopic(const string &topic, size_t msg_id, managed_shared_memory* segment);
+    void removeMessageFromTopic(
+      const std::string &topic,
+      size_t msg_id,
+      boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 为指定 topic 新增订阅者并初始化订阅者相关资源。
@@ -346,14 +363,16 @@ struct ShmManager {//内存内名称：ShmManager
      * @param segment 共享内存段对象。
      * @return size_t 分配给订阅者的唯一 ID。
      */
-    size_t add_subscriber(const string &topic, managed_shared_memory* segment);
+    size_t add_subscriber(
+      const std::string &topic,
+      boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 增加订阅者在同一 topic 下的重复订阅计数。
      * @param id 订阅者 ID。
      * @param segment 共享内存段对象。
      */
-    void incr_subscriber_dup(size_t id, managed_shared_memory* segment);
+    void incr_subscriber_dup(size_t id, boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 查询订阅者重复订阅计数。
@@ -361,7 +380,7 @@ struct ShmManager {//内存内名称：ShmManager
      * @param segment 共享内存段对象。
      * @return size_t 重复订阅计数，若不存在则返回 1。
      */
-    size_t get_subscriber_dup(size_t id, managed_shared_memory* segment);
+    size_t get_subscriber_dup(size_t id, boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 删除订阅者并清理其挂起消息、存活标记和重复订阅信息。
@@ -369,7 +388,10 @@ struct ShmManager {//内存内名称：ShmManager
      * @param id 订阅者 ID。
      * @param segment 共享内存段对象。
      */
-    void delete_subscriber(const string& topic, size_t id, managed_shared_memory* segment);
+    void delete_subscriber(
+      const std::string& topic,
+      size_t id,
+      boost::interprocess::managed_shared_memory* segment);
 
     /**
      * @brief 向指定 topic 的订阅者分发消息 ID，并计算消息引用计数。
@@ -379,11 +401,15 @@ struct ShmManager {//内存内名称：ShmManager
      * @param segment 共享内存段对象。
      * @return bool 是否存在有效订阅者并成功发布。
      */
-    bool publish(const string &topic, size_t myid, std::atomic_size_t &refcnt, managed_shared_memory* segment);
+    bool publish(
+      const std::string &topic,
+      size_t myid,
+      std::atomic_size_t &refcnt,
+      boost::interprocess::managed_shared_memory* segment);
 };
 
 // 由共享库提供定义（实现在 zc_shm.cpp）
-extern managed_shared_memory * shm;
+extern boost::interprocess::managed_shared_memory * shm;
 extern ShmManager * manager_;
 
 /**
@@ -391,10 +417,10 @@ extern ShmManager * manager_;
  * @param name 共享内存名称。
  * @param size 共享内存大小（字节）。
  */
-void shm_init(string name = "MyShm", size_t size = 64000000);
+void shm_init(std::string name = "MyShm", size_t size = 64000000);
 
 /**
  * @brief 关闭共享内存使用并在最后一个用户退出时清理共享内存。
  * @param name 共享内存名称。
  */
-void shm_shutdown(string name = "MyShm");
+void shm_shutdown(std::string name = "MyShm");

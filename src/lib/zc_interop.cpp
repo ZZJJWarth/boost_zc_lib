@@ -45,7 +45,8 @@ void erase_from_processing_queue(size_t subscriber_id, size_t msg_id)
     return;
   }
 
-  scoped_lock<interprocess_mutex> proc_lock(proc_ptr->mutex);
+  boost::interprocess::scoped_lock<boost::interprocess::interprocess_mutex> proc_lock(
+    proc_ptr->mutex);
   auto found = proc_ptr->myMessage.find(msg_id);
   if (found == proc_ptr->myMessage.end()) {
     return;

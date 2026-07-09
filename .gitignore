@@ -16,9 +16,6 @@ compile_commands.json
 *.a
 *.so
 
-# Local accidental self-symlink in this workspace
-/cpp_pubsub
-
 # Editor / OS local files
 .vscode/
 .idea/

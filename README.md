@@ -1,8 +1,8 @@
 # cpp_pubsub
 
-`cpp_pubsub` provides the Robonix shared-memory zero-copy transport used by
-the mapping stack. It builds a ROS 2/ament package that exports the
-`robonix_zc` shared library, C++ headers, and optional Python bindings.
+`cpp_pubsub` provides the Robonix shared-memory zero-copy transport for ROS 2
+Image and PointCloud2 messages. It builds a ROS 2/ament package that exports
+the `robonix_zc` shared library, C++ headers, and optional Python bindings.
 
 ## Build
 
